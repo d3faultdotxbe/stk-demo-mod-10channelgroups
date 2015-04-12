@@ -2,9 +2,9 @@
 //
 // Gary P. Scavone, 1999.
 
-#include "Instrmnt.h"
-#include "FileWvOut.h"
-#include "Messager.h"
+#include "stk/Instrmnt.h"
+#include "stk/FileWvOut.h"
+#include "stk/Messager.h"
 
 int voiceByNumber(int number, stk::Instrmnt **instrument);
 

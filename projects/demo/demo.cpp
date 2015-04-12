@@ -3,16 +3,17 @@
 // An example STK program that allows voice playback and control of
 // most of the STK instruments.
 
-#include "SKINImsg.h"
-#include "WvOut.h"
-#include "Instrmnt.h"
-#include "JCRev.h"
-#include "Voicer.h"
-#include "Skini.h"
-#include "RtAudio.h"
+#include "../../include/SKINImsg.h"
+#include "stk/Skini.h"
+#include "stk/WvOut.h"
+#include "stk/Instrmnt.h"
+#include "stk/JCRev.h"
+#include "stk/Voicer.h"
+#include "stk/Skini.h"
+#include "stk/RtAudio.h"
 
 #if defined(__STK_REALTIME__)
-  #include "Mutex.h"
+  #include "stk/Mutex.h"
 #endif
 
 // Miscellaneous command-line parsing and instrument allocation
@@ -43,7 +44,7 @@ struct TickData {
   StkFloat t60;
   unsigned int nWvOuts;
   int nVoices;
-  int currentVoice;
+  int **voices;
   int channels;
   int counter;
   bool realtime;
@@ -54,7 +55,7 @@ struct TickData {
   // Default constructor.
   TickData()
     : wvout(0), instrument(0), voicer(0), volume(1.0), t60(0.75),
-      nWvOuts(0), nVoices(1), currentVoice(0), channels(2), counter(0),
+      nWvOuts(0), nVoices(1), voices(0), channels(2), counter(0),
       realtime( false ), settling( false ), haveMessage( false ) {}
 };
 
@@ -72,6 +73,10 @@ void processMessage( TickData* data )
   //int group = 1;
   //  if ( data->nVoices > 1 ) group = data->message.channel;
 
+  data->haveMessage = false;
+  int voiceGroup = data->message.channel; //hack
+  if(voiceGroup >= data->nVoices || voiceGroup < 0)
+      return;
   switch( data->message.type ) {
 
   case __SK_Exit_:
@@ -81,13 +86,13 @@ void processMessage( TickData* data )
 
   case __SK_NoteOn_:
     if ( value2 > 0.0 ) { // velocity > 0
-      data->voicer->noteOn( value1, value2 );
+      data->voicer->noteOn( value1, value2, voiceGroup );
       break;
     }
     // else a note off, so continue to next case
 
   case __SK_NoteOff_:
-    data->voicer->noteOff( value1, value2 );
+    data->voicer->noteOff( value1, value2, voiceGroup );
     break;
 
   case __SK_ControlChange_:
@@ -96,31 +101,31 @@ void processMessage( TickData* data )
     else if (value1 == 7.0)
       data->volume = value2 * ONE_OVER_128;
     else if (value1 == 49.0)
-      data->voicer->setFrequency( value2 );
+      data->voicer->setFrequency( value2, voiceGroup );
     else if (value1 == 50.0)
-      data->voicer->controlChange( 128, value2 );
+      data->voicer->controlChange( 128, value2, voiceGroup );
     else if (value1 == 51.0)
       data->frequency = data->message.intValues[1];
     else if (value1 == 52.0) {
       data->frequency += ( data->message.intValues[1] << 7 );
       // Convert to a fractional MIDI note value
       StkFloat note = 12.0 * log( data->frequency / 220.0 ) / log( 2.0 ) + 57.0;
-      data->voicer->setFrequency( note );
+      data->voicer->setFrequency( note, voiceGroup );
     }
     else
-      data->voicer->controlChange( (int) value1, value2 );
+      data->voicer->controlChange( (int) value1, value2, voiceGroup );
     break;
 
   case __SK_AfterTouch_:
-    data->voicer->controlChange( 128, value1 );
+    data->voicer->controlChange( 128, value1, voiceGroup );
     break;
 
   case __SK_PitchChange_:
-    data->voicer->setFrequency( value1 );
+    data->voicer->setFrequency( value1, voiceGroup );
     break;
 
   case __SK_PitchBend_:
-    data->voicer->pitchBend( value1 );
+    data->voicer->pitchBend( value1, voiceGroup );
     break;
 
   case __SK_Volume_:
@@ -128,25 +133,22 @@ void processMessage( TickData* data )
     break;
 
   case __SK_ProgramChange_:
-    if ( data->currentVoice == (int) value1 ) break;
+    if ( *data->voices[voiceGroup] == (int) value1 ) break;
 
     // Two-stage program change process.
-    if ( data->settling == false ) goto settle;
+    //if ( data->settling == false ) goto settle; <-- settling calls silence on every voice in the voicer, so it's incompatible with this 10-channelgroups hack
 
     // Stage 2: delete and reallocate new voice(s)
-    for ( int i=0; i<data->nVoices; i++ ) {
-      data->voicer->removeInstrument( data->instrument[i] );
-      delete data->instrument[i];
-      data->currentVoice = voiceByNumber( (int)value1, &data->instrument[i] );
-      if ( data->currentVoice < 0 )
-        data->currentVoice = voiceByNumber( 0, &data->instrument[i] );
-      data->voicer->addInstrument( data->instrument[i] );
-      data->settling = false;
-    }
+    data->voicer->removeInstrument( data->instrument[voiceGroup] );
+    delete data->instrument[voiceGroup];
+    *data->voices[voiceGroup] = voiceByNumber( (int)value1, &data->instrument[voiceGroup] );
+    if ( *data->voices[voiceGroup] < 0 )
+      *data->voices[voiceGroup] = voiceByNumber( 0, &data->instrument[voiceGroup] );
+    data->voicer->addInstrument( data->instrument[voiceGroup], voiceGroup );
+    data->settling = false;
 
   } // end of switch
 
-  data->haveMessage = false;
   return;
 
  settle:
@@ -213,7 +215,7 @@ int main( int argc, char *argv[] )
 
   // Depending on how you compile STK, you may need to explicitly set
   // the path to the rawwave directory.
-  Stk::setRawwavePath( "../../rawwaves/" );
+  Stk::setRawwavePath( "/usr/share/stk/rawwaves/" );
 
   // By default, warning messages are not printed.  If we want to see
   // them, we need to specify that here.
@@ -228,19 +230,22 @@ int main( int argc, char *argv[] )
   // (in utilities.cpp).
   data.nVoices = countVoices( argc, argv );
   data.instrument = (Instrmnt **) calloc( data.nVoices, sizeof(Instrmnt *) );
-  data.currentVoice = voiceByName( argv[1], &data.instrument[0] );
-  if ( data.currentVoice < 0 ) {
+  data.voices = (int **) calloc( data.nVoices, sizeof(int*) );
+  data.voices[0] = new int( voiceByName( argv[1], &data.instrument[0] ) );
+  if ( *data.voices[0] < 0 ) {
     free( data.wvout );
     free( data.instrument );
+    delete data.voices[0];
+    free( data.voices );
     usage(argv[0]);
   }
   // If there was no error allocating the first voice, we should be fine for more.
   for ( i=1; i<data.nVoices; i++ )
-    voiceByName( argv[1], &data.instrument[i] );
+    data.voices[i] = new int( voiceByName( argv[1], &data.instrument[i] ) );
 
   data.voicer = (Voicer *) new Voicer( 0.0 );
   for ( i=0; i<data.nVoices; i++ )
-    data.voicer->addInstrument( data.instrument[i] );
+    data.voicer->addInstrument( data.instrument[i], i );
 
   // Parse the command-line flags, instantiate WvOut objects, and
   // instantiate the input message controller (in utilities.cpp).
@@ -262,8 +267,8 @@ int main( int argc, char *argv[] )
     try {
       dac.openStream( &parameters, NULL, format, (unsigned int)Stk::sampleRate(), &bufferFrames, &tick, (void *)&data );
     }
-    catch ( RtAudioError& error ) {
-      error.printMessage();
+    catch ( ... ) {
+      //error.printMessage();
       goto cleanup;
     }
   }
@@ -282,8 +287,8 @@ int main( int argc, char *argv[] )
     try {
       dac.startStream();
     }
-    catch ( RtAudioError &error ) {
-      error.printMessage();
+    catch ( ... ) {
+      //error.printMessage();
       goto cleanup;
     }
   }
@@ -307,8 +312,8 @@ int main( int argc, char *argv[] )
     try {
       dac.closeStream();
     }
-    catch ( RtAudioError& error ) {
-      error.printMessage();
+    catch ( ... ) {
+      //error.printMessage();
     }
   }
 #endif
@@ -322,6 +327,9 @@ int main( int argc, char *argv[] )
 
   for ( i=0; i<data.nVoices; i++ ) delete data.instrument[i];
   free( data.instrument );
+
+  for ( i=0; i <data.nVoices; ++i ) delete data.voices[i];
+  free( data.voices );
 
 	std::cout << "\nStk demo finished ... goodbye.\n\n";
   return 0;
